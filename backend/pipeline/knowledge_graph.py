@@ -13,8 +13,9 @@ import json
 import os
 from typing import List, Dict, Any, Tuple, Optional
 import networkx as nx
-import spacy
 from collections import defaultdict, Counter
+
+from pipeline.spacy_util import load_spacy_model
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class KnowledgeGraph:
     def initialize(self):
         """Load spaCy model"""
         try:
-            self.nlp = spacy.load(self.spacy_model)
+            self.nlp = load_spacy_model(self.spacy_model)
             logger.info(f"Loaded spaCy model: {self.spacy_model}")
         except Exception as e:
             logger.error(f"Failed to load spaCy model: {e}")

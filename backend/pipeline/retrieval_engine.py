@@ -12,13 +12,13 @@ import logging
 import asyncio
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
-import spacy
 from concurrent.futures import ThreadPoolExecutor
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import networkx as nx
 
 from .knowledge_graph import KnowledgeGraph
+from .spacy_util import load_spacy_model
 from .vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ class RetrievalEngine:
         """
         try:
             # Load spaCy model
-            self.nlp = spacy.load(self.spacy_model)
+            self.nlp = load_spacy_model(self.spacy_model)
             logger.info(f"Loaded spaCy model: {self.spacy_model}")
             
             # Set components

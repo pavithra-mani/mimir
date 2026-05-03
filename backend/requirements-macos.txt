@@ -2,6 +2,15 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 python-multipart==0.0.6
+pydantic-settings>=2.0
+
+# Auth & database (used by api/auth, models/database)
+sqlalchemy>=2.0
+bcrypt
+PyJWT>=2.0
+
+# Optional summarization API
+google-generativeai>=0.8.0
 
 # Core ML/AI dependencies (macOS compatible)
 numpy==1.26.4
@@ -24,12 +33,15 @@ stable-ts
 opencv-python-headless
 Pillow
 ffmpeg-python
+imagehash>=4.3.1
 
 # Text processing
 nltk
 pandas
 tqdm
 spacy
+# English pipeline used by knowledge graph + retrieval (required at runtime):
+#   python -m spacy download en_core_web_sm
 datasets
 accelerate
 

@@ -84,9 +84,9 @@ class PipelineOrchestrator:
         # RAG components always initialised (they are the core pipeline)
         try:
             self.semantic_chunker = SemanticChunker()
-            self.knowledge_graph = KnowledgeGraph()
+            self.knowledge_graph = KnowledgeGraph(spacy_model=config.spacy_model)
             self.vector_store = VectorStore()
-            self.retrieval_engine = RetrievalEngine()
+            self.retrieval_engine = RetrievalEngine(spacy_model=config.spacy_model)
         except Exception as e:
             logger.warning(f"RAG components init failed: {e}")
 
