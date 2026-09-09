@@ -1,6 +1,6 @@
 """Semantic Chunking - Greedy Sequential Cosine-Drop Algorithm
 
-Follows the notebook (cumrag-latest) Phase 2.1-2.2 exactly:
+Follows the notebook (-latest) Phase 2.1-2.2 exactly:
 - Sentence segmentation with word-level timestamp preservation
 - SentenceTransformer embeddings (all-MiniLM-L6-v2)
 - Greedy loop: start new chunk when cosine similarity drops below SIM_THRESHOLD

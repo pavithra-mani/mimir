@@ -1,6 +1,6 @@
 """Pipeline Orchestrator - Coordinates all pipeline phases
 
-Architecture (source of truth: cumrag-latest notebook):
+Architecture (source of truth: -latest notebook):
   Phase 1 : Transcription (WhisperX) + Keyframe extraction (k-means++ clustering)
   Phase 2 : Dual-channel indexing — Semantic chunks -> Knowledge Graph + FAISS Vector Store
   Phase 3 : Hybrid retrieval (KG + Vector) -> Gemini summarization (retrieved chunks ONLY)

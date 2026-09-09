@@ -172,6 +172,9 @@ async def download_subtitled_video(task_id: str):
     the result. This is lazy and request-triggered — it does NOT touch the processing
     pipeline.
     """
+    if not task_manager.get_task(task_id):
+        raise HTTPException(status_code=404, detail="Task not found")
+
     task_dir = os.path.join(config.upload_dir, task_id)
     if not os.path.isdir(task_dir):
         raise HTTPException(status_code=404, detail="Task not found")
