@@ -34,6 +34,13 @@ from pipeline.retrieval_engine import RetrievalEngine
 
 logger = logging.getLogger(__name__)
 
+# Minimum absolute cosine similarity (vector channel) for a topic to be considered
+# present in the video. Below this, topic summaries return a standard "no relevant
+# content" message instead of forcing Gemini to summarise unrelated chunks.
+# "Balanced" default; tunable. NOTE: only vector_score is an absolute signal —
+# graph_score is normalised per-batch in retrieval, so it cannot gate relevance.
+RELEVANCE_MIN_COSINE = 0.25
+
 
 class PipelineOrchestrator:
     """Orchestrates the complete video processing pipeline."""
@@ -433,6 +440,32 @@ class PipelineOrchestrator:
         except Exception as e:
             logger.warning(f"Retrieval failed ({e}); using empty context")
             retrieved_chunks = []
+
+        # Relevance gate (topic queries only): if the topic is essentially absent from
+        # the video, return a standard message instead of a forced/hallucinated summary.
+        # General summaries are always about the video itself and are never gated.
+        if is_topic_query:
+            best_vec = max(
+                (c.get("vector_score", 0.0) for c in retrieved_chunks), default=0.0
+            )
+            if not retrieved_chunks or best_vec < RELEVANCE_MIN_COSINE:
+                logger.info(
+                    f"Topic '{topic}' gated as off-topic "
+                    f"(best cosine={best_vec:.3f} < {RELEVANCE_MIN_COSINE}); "
+                    f"returning standard no-content message"
+                )
+                return {
+                    "summary": "There is no matching or relevant content to summarize.",
+                    "key_points": [],
+                    "summary_type": "no_content",
+                    "model": "relevance_gate",
+                    "summary_length": summary_length,
+                    "word_count": 0,
+                    "retrieved_chunk_count": len(retrieved_chunks),
+                    "retrieval_scores": [],
+                    "retrieved_chunks": [],
+                    "topic": topic,
+                }
 
         # Sort by timestamp for coherent context
         sorted_chunks = sorted(

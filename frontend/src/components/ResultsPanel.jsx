@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Download, Play, FileText, Brain, Image, Search, CheckCircle, BarChart2,
@@ -147,6 +147,46 @@ const PanelStyles = () => (
       color: rgba(248, 235, 190, 0.82); white-space: pre-wrap; line-height: 1.6;
     }
 
+    /* Caption style selector */
+    .rp-cap-style-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+    .rp-cap-style-label { font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.16em; color: rgba(201,168,76,0.55); }
+    .rp-cap-seg { display: inline-flex; padding: 3px; background: rgba(5,10,20,0.6); border: 1px solid rgba(201,168,76,0.18); border-radius: 100px; gap: 2px; }
+    .rp-cap-seg-btn {
+      font-family: 'DM Sans', sans-serif; font-size: 0.73rem; font-weight: 500;
+      padding: 5px 13px; border-radius: 100px; border: none; background: transparent;
+      color: rgba(220,195,130,0.5); cursor: pointer; transition: all 0.2s ease;
+    }
+    .rp-cap-seg-btn.active {
+      background: linear-gradient(135deg, rgba(201,168,76,0.9) 0%, rgba(170,130,40,0.9) 100%);
+      color: #0a0f1a; box-shadow: 0 2px 10px rgba(201,168,76,0.2);
+    }
+
+    /* Caption overlay (in-app karaoke / flashy styles) */
+    .rp-cap-overlay { position: absolute; inset: 0; pointer-events: none; display: flex; align-items: flex-end; justify-content: center; padding: 0 6% 7%; z-index: 2; }
+    .rp-cap { max-width: 94%; text-align: center; line-height: 1.32; }
+    .rp-cap span { display: inline-block; }
+
+    .rp-cap--classic {
+      font-family: 'DM Sans', sans-serif; font-size: clamp(0.9rem, 2.6vw, 1.4rem); font-weight: 600;
+      color: #fff; text-shadow: 0 2px 6px rgba(0,0,0,0.9); background: rgba(0,0,0,0.5); padding: 6px 14px; border-radius: 8px;
+    }
+
+    .rp-cap--karaoke {
+      font-family: 'DM Sans', sans-serif; font-size: clamp(0.95rem, 2.8vw, 1.5rem); font-weight: 700;
+      text-shadow: 0 2px 8px rgba(0,0,0,0.95); background: rgba(0,0,0,0.42); padding: 8px 16px; border-radius: 10px;
+    }
+    .rp-cap--karaoke span { color: rgba(255,255,255,0.5); padding: 0 4px; transition: color 0.12s ease; }
+    .rp-cap--karaoke span.spoken { color: #fff; }
+    .rp-cap--karaoke span.active { color: #f0d070; text-shadow: 0 0 14px rgba(240,208,112,0.85); }
+
+    .rp-cap--clean {
+      font-family: 'DM Sans', sans-serif; font-size: clamp(0.85rem, 2.3vw, 1.25rem); font-weight: 500;
+      color: rgba(255,255,255,0.9); text-shadow: 0 1px 5px rgba(0,0,0,0.9);
+      background: linear-gradient(transparent, rgba(0,0,0,0.55)); padding: 10px 18px; border-radius: 6px;
+    }
+    .rp-cap--clean span { padding: 0 3px; transition: color 0.12s ease; }
+    .rp-cap--clean span.active { color: #fff; font-weight: 700; }
+
     /* Summary */
     .rp-summary-layout { display: grid; grid-template-columns: 1fr; gap: 16px; }
     @media (min-width: 640px) { .rp-summary-layout { grid-template-columns: 3fr 2fr; } }
@@ -250,6 +290,78 @@ const PanelStyles = () => (
   `}</style>
 );
 
+/* ─── Caption styles + overlay (in-app karaoke / flashy captions) ─────────────── */
+const CAPTION_STYLES = [
+  { id: 'classic', label: 'Classic' },
+  { id: 'karaoke', label: 'Karaoke' },
+  { id: 'clean',   label: 'Clean'   },
+];
+
+// Split a segment into per-word timings. Uses real word timestamps if present
+// (seg.words), otherwise interpolates within [start,end] by word length — zero
+// backend cost, accurate enough to read along for short Whisper segments.
+function wordsForSegment(seg) {
+  if (!seg) return [];
+  if (Array.isArray(seg.words) && seg.words.length) {
+    return seg.words.map(w => ({ text: (w.word ?? w.text ?? '').trim(), start: w.start, end: w.end }));
+  }
+  const toks = (seg.text || '').trim().split(/\s+/).filter(Boolean);
+  const total = toks.reduce((a, w) => a + w.length + 1, 0) || 1;
+  const dur = Math.max((seg.end ?? 0) - (seg.start ?? 0), 0.01);
+  let acc = seg.start ?? 0;
+  return toks.map(w => {
+    const wd = (dur * (w.length + 1)) / total;
+    const o = { text: w, start: acc, end: acc + wd };
+    acc += wd;
+    return o;
+  });
+}
+
+const CaptionOverlay = ({ videoRef, segments, styleId }) => {
+  const [t, setT] = useState(0);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    let raf;
+    const tick = () => { setT(v.currentTime); raf = requestAnimationFrame(tick); };
+    const start = () => { cancelAnimationFrame(raf); tick(); };
+    const stop = () => cancelAnimationFrame(raf);
+    const seek = () => setT(v.currentTime);
+    v.addEventListener('play', start);
+    v.addEventListener('pause', stop);
+    v.addEventListener('ended', stop);
+    v.addEventListener('seeking', seek);
+    if (!v.paused && !v.ended) start(); else setT(v.currentTime);
+    return () => {
+      cancelAnimationFrame(raf);
+      v.removeEventListener('play', start);
+      v.removeEventListener('pause', stop);
+      v.removeEventListener('ended', stop);
+      v.removeEventListener('seeking', seek);
+    };
+  }, [videoRef, segments]);
+
+  const seg = (segments || []).find(s => t >= (s.start ?? 0) && t < (s.end ?? 0));
+  const words = useMemo(() => wordsForSegment(seg), [seg]);
+  if (!seg || !words.length) return null;
+
+  const activeIdx = words.findIndex(w => t >= w.start && t < w.end);
+
+  return (
+    <div className={`rp-cap-overlay rp-cap-overlay--${styleId}`}>
+      <div className={`rp-cap rp-cap--${styleId}`}>
+        {styleId === 'classic'
+          ? seg.text
+          : words.map((w, i) => {
+              const cls = i === activeIdx ? 'active' : (activeIdx >= 0 && i < activeIdx ? 'spoken' : '');
+              return <span key={i} className={cls}>{w.text}{' '}</span>;
+            })}
+      </div>
+    </div>
+  );
+};
+
 /* ─── ResultsPanel component ─────────────────────────────────────────────────── */
 const ResultsPanel = ({
   results,
@@ -272,6 +384,9 @@ const ResultsPanel = ({
   if (results.keyframes?.length > 0) tabs.push({ id: 'keyframes', label: 'Keyframes', icon: Image });
 
   const [activeTab, setActiveTab] = useState(tabs[0]?.id || 'transcript');
+  const [captionStyle, setCaptionStyle] = useState('classic');
+  const videoRef = useRef(null);
+  const captionSegments = results.segments || [];
 
   return (
     <div className="rp-wrap">
@@ -356,19 +471,46 @@ const ResultsPanel = ({
                 <button onClick={() => onDownload('subtitles')} className="rp-icon-btn" title="Download subtitles">
                   <Download size={14} />
                 </button>
+                {results.subtitles_vtt_url && taskId && (
+                  <a href={`/api/v1/download/subtitled-video/${taskId}`} download
+                    className="rp-icon-btn" title="Download video with subtitles">
+                    <Play size={14} />
+                  </a>
+                )}
               </div>
             </div>
             <div className="rp-panel-body">
+              {results.video_url && captionSegments.length > 0 && (
+                <div className="rp-cap-style-row">
+                  <span className="rp-cap-style-label">Caption style</span>
+                  <div className="rp-cap-seg">
+                    {CAPTION_STYLES.map(({ id, label }) => (
+                      <button key={id} type="button"
+                        onClick={() => setCaptionStyle(id)}
+                        className={`rp-cap-seg-btn${captionStyle === id ? ' active' : ''}`}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="rp-video-container">
                 {results.video_url ? (
-                  <video controls preload="metadata">
+                  <>
+                  <video ref={videoRef} controls preload="metadata">
                     <source src={results.video_url} />
-                    {results.subtitles_vtt_url && (
+                    {/* Native track only as fallback when we have no timed segments to
+                        drive the custom overlay — avoids double captions. */}
+                    {results.subtitles_vtt_url && captionSegments.length === 0 && (
                       <track kind="subtitles" label="English" srcLang="en"
                         src={results.subtitles_vtt_url} default />
                     )}
                     Your browser does not support inline video playback.
                   </video>
+                  {captionSegments.length > 0 && (
+                    <CaptionOverlay videoRef={videoRef} segments={captionSegments} styleId={captionStyle} />
+                  )}
+                  </>
                 ) : (
                   <div className="rp-video-fallback">Video preview not available.</div>
                 )}

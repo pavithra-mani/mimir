@@ -491,6 +491,8 @@ const VideoUpload = () => {
             transcript: status.results?.transcript?.segments
               ? status.results.transcript.segments.map(s => s.text).join(' ')
               : status.results?.transcript || 'No transcript available',
+            // Keep timed segments for the in-app caption overlay (karaoke / flashy styles).
+            segments: status.results?.transcript?.segments || [],
             summary: {
               text: rawSummary?.summary || (typeof rawSummary === 'string' ? rawSummary : 'No summary available'),
               key_points: rawSummary?.key_points || [],

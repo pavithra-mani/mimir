@@ -4,8 +4,9 @@ import os
 import uuid
 import asyncio
 import logging
+import subprocess
 from fastapi import APIRouter, File, UploadFile, HTTPException, BackgroundTasks, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
 from pipeline.orchestrator import PipelineError
@@ -158,6 +159,75 @@ async def get_pipeline_logs(task_id: str):
     results = task.results or {}
     logs = results.get("pipeline_logs", {})
     return {"task_id": task_id, "logs": logs, "status": task.status}
+
+VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v")
+
+
+@router.get("/download/subtitled-video/{task_id}")
+async def download_subtitled_video(task_id: str):
+    """Return the source video with subtitles embedded, generated on demand.
+
+    Soft-muxes the already-generated ``subtitles.vtt`` into the source video as a
+    selectable ``mov_text`` track using ``ffmpeg -c copy`` (no re-encode), then caches
+    the result. This is lazy and request-triggered — it does NOT touch the processing
+    pipeline.
+    """
+    task_dir = os.path.join(config.upload_dir, task_id)
+    if not os.path.isdir(task_dir):
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    vtt_path = os.path.join(task_dir, "subtitles.vtt")
+    if not os.path.isfile(vtt_path):
+        raise HTTPException(status_code=404, detail="Subtitles not generated for this video")
+
+    # Locate the source video, skipping the cached subtitled output and sidecars.
+    source_video = None
+    for name in sorted(os.listdir(task_dir)):
+        lower = name.lower()
+        if lower.endswith("_subtitled.mp4"):
+            continue
+        if lower.endswith(VIDEO_EXTS):
+            source_video = os.path.join(task_dir, name)
+            break
+    if not source_video:
+        raise HTTPException(status_code=404, detail="Source video not found")
+
+    stem = os.path.splitext(os.path.basename(source_video))[0]
+    out_path = os.path.join(task_dir, f"{stem}_subtitled.mp4")
+    download_name = f"{stem}_subtitled.mp4"
+
+    # Serve the cached file if it is newer than both inputs.
+    if os.path.isfile(out_path):
+        out_mtime = os.path.getmtime(out_path)
+        if out_mtime >= os.path.getmtime(source_video) and out_mtime >= os.path.getmtime(vtt_path):
+            return FileResponse(out_path, media_type="video/mp4", filename=download_name)
+
+    # Soft-mux subtitles as a selectable mov_text track — fast, no re-encode.
+    # NOTE: mov_text targets MP4-family containers; exotic inputs may need a different -c:s.
+    cmd = [
+        "ffmpeg", "-y", "-i", source_video, "-i", vtt_path,
+        "-map", "0", "-map", "1", "-c", "copy", "-c:s", "mov_text",
+        "-metadata:s:s:0", "language=eng", out_path,
+    ]
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run, cmd, capture_output=True, text=True, timeout=600
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=500, detail="Subtitle muxing timed out")
+
+    if proc.returncode != 0:
+        if os.path.isfile(out_path):
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+        stderr_tail = (proc.stderr or "")[-800:]
+        logger.error(f"ffmpeg mux failed for {task_id}: {stderr_tail}")
+        raise HTTPException(status_code=500, detail=f"Failed to mux subtitles: {stderr_tail}")
+
+    return FileResponse(out_path, media_type="video/mp4", filename=download_name)
+
 
 def _to_url_path(path: str) -> str:
     """Normalise a backend file path to a forward-slash URL path under /uploads."""
