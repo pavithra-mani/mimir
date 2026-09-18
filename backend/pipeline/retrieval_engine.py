@@ -365,29 +365,53 @@ class RetrievalEngine:
             else self.fusion_weights
         )
 
-        # Normalize graph scores against the max in this batch — keeps the graph channel
-        # meaningfully contributing regardless of absolute mention counts.
+        # Normalize graph scores against the max in this batch — kept as a display/diagnostic
+        # value (surfaced in the API and the retrieval logs), NOT used to compute final_score
+        # anymore (see RRF note below).
         max_graph_raw = max((r.get("graph_score", 0.0) for r in merged_results), default=0.0)
         graph_norm_denom = max_graph_raw if max_graph_raw > 0 else 1.0
 
         for result in merged_results:
-            vector_score = min(max(result.get("vector_score", 0.0), 0.0), 1.0)
-            graph_raw = result.get("graph_score", 0.0)
-            graph_score = max(graph_raw / graph_norm_denom, 0.0)
-            text_overlap = min(max(text_overlap_scores.get(result["chunk_id"], 0.0), 0.0), 1.0)
-
-            final_score = (
-                weights["vector"] * vector_score
-                + weights["graph"] * graph_score
-                + weights["text_overlap"] * text_overlap
+            result["vector_score"] = round(min(max(result.get("vector_score", 0.0), 0.0), 1.0), 4)
+            result["graph_score"] = round(max(result.get("graph_score", 0.0) / graph_norm_denom, 0.0), 4)
+            result["text_overlap_score"] = round(
+                min(max(text_overlap_scores.get(result["chunk_id"], 0.0), 0.0), 1.0), 4
             )
+            result["vector_rank"] = 1.0 if result["vector_score"] > 0 else 0.0
+            result["graph_rank"] = 1.0 if result["graph_score"] > 0 else 0.0
 
-            result["final_score"] = round(final_score, 4)
-            result["graph_score"] = round(graph_score, 4)
-            result["vector_score"] = round(vector_score, 4)
-            result["text_overlap_score"] = round(text_overlap, 4)
-            result["vector_rank"] = 1.0 if vector_score > 0 else 0.0
-            result["graph_rank"] = 1.0 if graph_score > 0 else 0.0
+        # Reciprocal Rank Fusion: combine each channel's RANK (not its raw/normalized score).
+        # A weighted sum of raw scores breaks when channels live on different scales — e.g.
+        # graph_score here is normalized against the max IN THIS BATCH, so the top graph hit
+        # is always ~1.0 whether it had 2 mentions or 200, making its weight mean something
+        # different video to video. RRF sidesteps that: only ORDER within each channel matters,
+        # so it's scale-free and doesn't need per-video calibration. k=60 is the standard
+        # constant from Cormack et al. 2009 (dampens the impact of rank #1 vs #2 while still
+        # decaying quickly for low ranks).
+        RRF_K = 60
+
+        def _channel_ranks(score_key: str) -> Dict[str, int]:
+            ranked = sorted(
+                (r for r in merged_results if r.get(score_key, 0.0) > 0),
+                key=lambda r: r[score_key],
+                reverse=True,
+            )
+            return {r["chunk_id"]: i + 1 for i, r in enumerate(ranked)}
+
+        vector_ranks = _channel_ranks("vector_score")
+        graph_ranks = _channel_ranks("graph_score")
+        text_ranks = _channel_ranks("text_overlap_score")
+
+        for result in merged_results:
+            cid = result["chunk_id"]
+            rrf_score = 0.0
+            if cid in vector_ranks:
+                rrf_score += weights["vector"] / (RRF_K + vector_ranks[cid])
+            if cid in graph_ranks:
+                rrf_score += weights["graph"] / (RRF_K + graph_ranks[cid])
+            if cid in text_ranks:
+                rrf_score += weights["text_overlap"] / (RRF_K + text_ranks[cid])
+            result["final_score"] = round(rrf_score, 6)
 
         merged_results.sort(key=lambda x: x["final_score"], reverse=True)
         return merged_results[:k]
