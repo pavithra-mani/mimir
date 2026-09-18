@@ -369,7 +369,37 @@ class KnowledgeGraph:
         # Sort by mention count so high-frequency entities surface first
         results.sort(key=lambda x: len(x["mentions"]), reverse=True)
         return results[:top_k]
-    
+
+    def get_relations_for_chunks(self, chunk_ids: set, top_k: int = 25) -> List[Dict[str, Any]]:
+        """Return graph edges grounded in the given chunk_ids only.
+
+        Used to surface actual KG relations (SVO + co-occurrence) for the same
+        chunks already selected by retrieval, so the LLM gets structured facts
+        that are provably backed by the retrieved text — never relations from
+        chunks outside the current context.
+        """
+        if not self.graph or not chunk_ids:
+            return []
+
+        scored: List[Tuple[str, str, str, float]] = []
+        for src, dst, data in self.graph.edges(data=True):
+            edge_chunk_ids = data.get("chunk_ids", set())
+            if not (edge_chunk_ids & chunk_ids):
+                continue
+            predicates = data.get("predicates", [])
+            # Prefer a real SVO predicate over the generic "co-occurs" filler
+            predicate = next((p for p in predicates if p != "co-occurs"), None)
+            if predicate is None:
+                predicate = predicates[0] if predicates else "relates to"
+            scored.append((src, predicate, dst, data.get("confidence", 0.5)))
+
+        # Real SVO relations first (more informative than co-occurrence), then by confidence
+        scored.sort(key=lambda r: (r[1] == "co-occurs" or r[1] == "relates to", -r[3]))
+        return [
+            {"subject": s, "predicate": p, "object": o}
+            for s, p, o, _ in scored[:top_k]
+        ]
+
     def get_related_entities(self, entity: str, relation_type: Optional[str] = None, top_k: int = 10) -> List[Dict[str, Any]]:
         """Get entities related to the given entity"""
         if not self.graph or not self.graph.has_node(entity):

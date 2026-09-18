@@ -481,6 +481,18 @@ class PipelineOrchestrator:
             filler_re.sub("", c["text"]).strip() for c in sorted_chunks
         )
 
+        # Surface actual KG relations behind these same chunks — gives Gemini
+        # structured facts that are provably grounded in the retrieved text
+        # (never relations from chunks outside the current context).
+        relations_text = ""
+        if self.knowledge_graph:
+            chunk_ids = {c.get("chunk_id", "") for c in sorted_chunks if c.get("chunk_id")}
+            relations = self.knowledge_graph.get_relations_for_chunks(chunk_ids)
+            if relations:
+                relations_text = "\n".join(
+                    f"- {r['subject']} {r['predicate']} {r['object']}" for r in relations
+                )
+
         # Dual-channel diagnostics — confirm BOTH KG and vector contributed signal.
         n_graph = sum(1 for c in sorted_chunks if c.get("graph_score", 0) > 0)
         n_vector = sum(1 for c in sorted_chunks if c.get("vector_score", 0) > 0)
@@ -502,7 +514,9 @@ class PipelineOrchestrator:
             )
 
         try:
-            result = await self._summarize_with_gemini(context_text, topic, summary_length)
+            result = await self._summarize_with_gemini(
+                context_text, topic, summary_length, relations_text
+            )
         except Exception as e:
             logger.warning(f"Gemini failed ({e}); extractive fallback")
             fallback_max = {"short": 3, "medium": 5, "long": 9}.get(summary_length, 5)
@@ -550,6 +564,7 @@ class PipelineOrchestrator:
         transcript_text: str,
         topic: Optional[str] = None,
         summary_length: str = "medium",
+        relations_text: str = "",
     ) -> Dict[str, Any]:
         import google.generativeai as genai
 
@@ -574,12 +589,23 @@ class PipelineOrchestrator:
             f"- <key point {i+1}>" for i in range(profile["kp_count"])
         )
 
+        relations_block = (
+            f"\n\nEXTRACTED RELATIONS (from the video, for cross-reference only — "
+            f"use these to keep entity/relationship details consistent, but do not "
+            f"state anything as fact unless it also appears in the transcript excerpts above):\n"
+            f"{relations_text}"
+            if relations_text
+            else ""
+        )
+
         prompt = f"""You are summarizing a video transcript. Write clearly and concisely.
 
 {topic_hint}
 
-TRANSCRIPT:
-{text_slice}
+Only use information explicitly present in the transcript excerpts (and, if given, the extracted relations) below. Do not add facts, names, or claims that are not present there.
+
+TRANSCRIPT EXCERPTS:
+{text_slice}{relations_block}
 
 Respond in exactly this format (no extra text before or after):
 
