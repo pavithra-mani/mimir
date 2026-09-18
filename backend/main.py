@@ -129,5 +129,12 @@ if __name__ == "__main__":
         "main:app",
         host=config.api_host,
         port=config.api_port,
-        reload=True
+        reload=True,
+        # Without this, --reload watches the whole backend/ tree by default —
+        # including uploads/ and mimir.db, which the pipeline itself writes to
+        # continuously while processing a video (audio extraction, keyframes,
+        # chunks, FAISS index, KG pickle, every progress update). Each of those
+        # writes looks like a code change, so the reloader restarts the server
+        # mid-request and silently kills whatever task was in flight.
+        reload_excludes=["uploads/*", "mimir.db", "*.db", "__pycache__/*"],
     )
