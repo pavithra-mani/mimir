@@ -414,8 +414,67 @@ class RetrievalEngine:
             result["final_score"] = round(rrf_score, 6)
 
         merged_results.sort(key=lambda x: x["final_score"], reverse=True)
-        return merged_results[:k]
-    
+
+        # MMR diversity selection: a flat top-k on a single query embedding can
+        # cluster around whichever narrow region of the video scored highest and
+        # starve other topics — bad specifically for general "summarize the main
+        # topics" queries, which need breadth. Take a wider candidate pool by
+        # final_score, then greedily pick chunks that trade off relevance against
+        # similarity to what's already been selected. Topic-mode queries use a
+        # higher lambda (less diversity pressure) since they're already narrowly
+        # scoped by the relevance gate and shouldn't be diluted.
+        candidate_pool = merged_results[: max(k * 3, 50)]
+        lambda_param = 0.85 if topic_mode else 0.7
+        return self._mmr_select(candidate_pool, k, lambda_param)
+
+    @staticmethod
+    def _mmr_select(
+        candidates: List[Dict[str, Any]], k: int, lambda_param: float = 0.7
+    ) -> List[Dict[str, Any]]:
+        """Maximal Marginal Relevance selection over a pre-scored candidate pool.
+
+        candidates must already be sorted by final_score descending. Relevance is
+        min-max normalized within the pool so it's on the same [0,1] scale as
+        cosine similarity — final_score's raw magnitude (an RRF sum) is otherwise
+        tiny compared to cosine and diversity would dominate regardless of lambda.
+        """
+        if len(candidates) <= k:
+            return candidates
+
+        scores = [c["final_score"] for c in candidates]
+        lo, hi = min(scores), max(scores)
+        span = (hi - lo) or 1.0
+        relevance = {c["chunk_id"]: (c["final_score"] - lo) / span for c in candidates}
+
+        embeddings = {
+            c["chunk_id"]: np.array(c["embedding"], dtype=np.float32)
+            for c in candidates
+            if c.get("embedding") is not None
+        }
+
+        remaining = list(candidates)
+        selected = [remaining.pop(0)]  # highest-scoring chunk always included
+
+        while remaining and len(selected) < k:
+            best_idx, best_mmr = 0, -float("inf")
+            for i, cand in enumerate(remaining):
+                cand_emb = embeddings.get(cand["chunk_id"])
+                if cand_emb is None:
+                    max_sim = 0.0
+                else:
+                    sims = [
+                        float(np.dot(cand_emb, embeddings[sel["chunk_id"]]))
+                        for sel in selected
+                        if sel["chunk_id"] in embeddings
+                    ]
+                    max_sim = max(sims) if sims else 0.0
+                mmr = lambda_param * relevance[cand["chunk_id"]] - (1 - lambda_param) * max_sim
+                if mmr > best_mmr:
+                    best_mmr, best_idx = mmr, i
+            selected.append(remaining.pop(best_idx))
+
+        return selected
+
     def _compute_text_overlap_scores(self, 
                                    results: List[Dict[str, Any]], 
                                    decomposed_query: Dict[str, Any]) -> Dict[str, float]:

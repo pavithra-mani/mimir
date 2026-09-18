@@ -115,6 +115,8 @@ class VectorStore:
                 "time_end": float(chunk["time_end"]),
                 "token_count": int(chunk.get("token_count", 0)),
                 "sentence_count": int(chunk.get("sentence_count", 0)),
+                "cluster_id": chunk.get("cluster_id"),
+                "informativeness": chunk.get("informativeness"),
                 "prev_chunk": chunks[i - 1]["chunk_id"] if i > 0 else None,
                 "next_chunk": chunks[i + 1]["chunk_id"] if i < len(chunks) - 1 else None,
             }
