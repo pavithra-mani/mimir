@@ -44,6 +44,8 @@ backend/=*
 backend/test_video.*
 backend/.mimir_cache/
 backend/.mimir_run.env
+backend/eval/venv_eval/
+backend/eval/data/
 
 # Frontend specific
 frontend/node_modules/
