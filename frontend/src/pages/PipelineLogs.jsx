@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, useSearchParams, Link } from 'react-router-dom';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   ScatterChart, Scatter, Cell, Legend,
@@ -186,6 +186,50 @@ const Stat = ({ val, label }) => (
   </div>
 );
 
+/* ─── Offered-vs-cited keyframes for one summary ───────────────────────────── */
+const fmtClock = (sec) => `${Math.floor((sec || 0) / 60)}:${String(Math.floor((sec || 0) % 60)).padStart(2, '0')}`;
+
+const RefBlock = ({ title, data }) => {
+  if (!data) return null;
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div className="pl-chart-label">{title}</div>
+      <div className="pl-stats">
+        <Stat val={data.offered_count} label="Keyframes offered" />
+        <Stat val={data.cited_count} label="Cited by LLM" />
+        <Stat val={`${Math.round((data.cited_ratio || 0) * 100)}%`} label="Cited / offered" />
+        <Stat val={data.invalid?.length ?? 0} label="Invalid refs" />
+      </div>
+      {data.offered_count === 0 ? (
+        <div style={{ fontSize: '0.8rem', color: 'rgba(220,195,130,0.5)', fontStyle: 'italic' }}>
+          No keyframes were offered to this summary.
+        </div>
+      ) : (
+        <div className="pl-chunk-list">
+          {data.offered.map((a) => (
+            <div key={a.keyframe_number} className="pl-chunk-item">
+              <span className="pl-chunk-ts">KF {a.keyframe_number}</span>
+              <span className="pl-chunk-score" style={{ color: a.cited ? '#98c379' : 'rgba(220,195,130,0.4)' }}>
+                {a.cited ? 'cited' : 'not cited'}
+              </span>
+              <span className="pl-chunk-text">
+                @{fmtClock(a.timestamp)} · chunk {fmtClock(a.time_start)}–{fmtClock(a.time_end)}
+                {a.has_ocr ? ' · on-screen text' : ''}
+                {a.grounded_entities?.length ? ` · visible: ${a.grounded_entities.join(', ')}` : ''}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {data.invalid?.length > 0 && (
+        <div style={{ marginTop: 8, fontSize: '0.76rem', color: '#e06c75' }}>
+          Referenced but never offered (hallucinated or off-topic): Keyframe {data.invalid.join(', ')}
+        </div>
+      )}
+    </div>
+  );
+};
+
 /* ─── Custom tooltip for recharts ────────────────────────────────────────────── */
 const DarkTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
@@ -205,6 +249,8 @@ const PHASE_LABELS = ['Phase 1: Ingestion', 'Phase 2: Indexing', 'Phase 3: Retri
 
 const PipelineLogs = () => {
   const { taskId } = useParams();
+  const [searchParams] = useSearchParams();
+  const backTab = searchParams.get('tab');
   const [logs, setLogs] = useState(null);
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -277,7 +323,10 @@ const PipelineLogs = () => {
 
       <nav className="pl-nav">
         <a href="/landing" className="pl-nav-brand">Mimir</a>
-        <Link to="/upload" className="pl-back"><ArrowLeft size={14} /> Back to Upload</Link>
+        <Link
+          to={taskId ? `/upload?task=${taskId}${backTab ? `&tab=${backTab}` : ''}` : '/upload'}
+          className="pl-back"
+        ><ArrowLeft size={14} /> Back to Results</Link>
       </nav>
 
       <div className="pl-page">
@@ -395,6 +444,7 @@ const PipelineLogs = () => {
           badge={p3.timing_sec ? fmtTime(p3.timing_sec) : null}>
           <div className="pl-stats">
             <Stat val={p3.general_retrieved_count} label="Chunks retrieved" />
+            <Stat val={p3.general_top_k} label="Budget (k)" />
             <Stat val={p3.topic_retrieved_count || null} label="Topic retrieved" />
             <Stat val={retrievalScores.length} label="Scores tracked" />
           </div>
@@ -445,12 +495,36 @@ const PipelineLogs = () => {
           )}
         </Panel>
 
+        {/* Keyframe references */}
+        <Panel icon={BarChart2} title="Keyframe References"
+          desc="Which keyframes were fed to the summaries, and which the LLM actually cited"
+          badge={p3.keyframe_refs ? `${p3.keyframe_refs.general?.cited_count ?? 0}/${p3.keyframe_refs.general?.offered_count ?? 0} cited` : null}>
+          {!p3.keyframe_refs ? (
+            <div style={{ fontSize: '0.8rem', color: 'rgba(220,195,130,0.5)', fontStyle: 'italic' }}>
+              No keyframe-reference data for this task (processed before this feature existed).
+            </div>
+          ) : (
+            <>
+              <div className="pl-stats">
+                <Stat val={p3.keyframe_refs.total_keyframes} label="Keyframes" />
+                <Stat val={p3.keyframe_refs.hosting_chunks} label="Chunks hosting a keyframe" />
+                <Stat val={p3.keyframe_labels ?? 0} label="LLM labels" />
+                <Stat val={p2.visual?.frames_with_ocr ?? '—'} label="Frames with OCR" />
+                <Stat val={p2.visual?.graph?.grounded_links ?? '—'} label="CLIP grounded links" />
+                <Stat val={p2.visual?.graph?.merged_with_speech ?? '—'} label="Said + shown entities" />
+              </div>
+              <RefBlock title="General summary" data={p3.keyframe_refs.general} />
+              <RefBlock title={`Topic summary${p3.topic ? `: ${p3.topic}` : ''}`} data={p3.keyframe_refs.topic} />
+            </>
+          )}
+        </Panel>
+
         {/* Explanation */}
         <Panel icon={Clock} title="Architecture Explanation" desc="Why each stage exists" defaultOpen={false}>
           {[
             ['Phase 1: Ingestion', 'WhisperX extracts word-level timestamps. OpenCV samples 1 frame/second. A three-metric score (sharpness, contrast, edge density) rates each frame. K-means++ clusters frames by pixel features with k proportional to video duration — this discovers visual scene changes without supervision. Per-scene keyframes are selected and deduplicated by perceptual hash.'],
             ['Phase 2: Dual-Channel Indexing', 'Transcript sentences are embedded with all-MiniLM-L6-v2. A greedy algorithm starts a new chunk when cosine similarity between consecutive sentences drops below 0.75 or the token count exceeds 400. Each chunk feeds both a NetworkX knowledge graph (spaCy NER + SVO relations with timestamp metadata) and a FAISS IndexFlatIP (cosine similarity via normalised inner product).'],
-            ['Phase 3: Hybrid Retrieval', 'A query is decomposed into entity terms (graph channel) and embedded (vector channel) simultaneously. Graph search returns chunks containing matched entities weighted by mention frequency. Vector search returns top-k cosine-similar chunks. Results are fused with final_score = 0.5 × vector + 0.3 × graph/10 + 0.2 × text_overlap, then ranked and top-30 fed to Gemini. The LLM never sees the full transcript — only the retrieved context.'],
+            ['Phase 3: Hybrid Retrieval', 'A query is decomposed into entity terms (graph channel) and embedded (vector channel) simultaneously. Graph search returns chunks containing matched entities weighted by mention frequency. Vector search returns top-k cosine-similar chunks. Results are fused with final_score = 0.5 × vector + 0.3 × graph/10 + 0.2 × text_overlap, then ranked and the top-k (k scales with video length: 15–60 general, 8–30 topic) fed to Gemini, trimmed to a context budget. The LLM never sees the full transcript — only the retrieved context.'],
             ['Two Summary Types', 'General summary uses the query "summarize the main topics, key insights, and important content" through the same hybrid retrieval. Topic summary uses the user-provided topic string as the query. Both go through the identical retrieval + Gemini pipeline; the only difference is the query.'],
           ].map(([title, body]) => (
             <div key={title} style={{ marginBottom: 20 }}>

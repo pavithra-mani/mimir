@@ -286,6 +286,147 @@ class KnowledgeGraph:
                     relation_type="semantic"
                 )
     
+    # ------------------------------------------------------------------ #
+    # Cross-modal (visual) extension                                       #
+    # ------------------------------------------------------------------ #
+
+    def add_visual_entities(
+        self,
+        keyframes: List[Dict[str, Any]],
+        chunks: List[Dict[str, Any]],
+        visual_index,
+        ground_min_sim: float = 0.20,
+        ground_top_k: int = 3,
+        max_spoken_candidates: int = 25,
+    ) -> Dict[str, Any]:
+        """Add the visual modality to the (speech) graph.
+
+        For every keyframe linked to a chunk (keyframe["chunk_id"]):
+          * a frame node ``keyframe_N`` (modality=visual) anchored to that chunk's time;
+          * entities from OCR'd on-screen text become nodes. If the same entity is
+            also spoken, the existing node is upgraded to modality="both" — the
+            strongest cross-modal evidence (said AND shown);
+          * ``frame --shows--> ocr_entity`` edges;
+          * CLIP grounding: spoken entities of the linked chunk are scored against
+            the frame image; the top ones get ``frame --visually grounds--> entity``
+            edges (weighted by CLIP cosine);
+          * OCR entity --displayed-with--> top spoken entities of the chunk.
+        All new nodes/edges carry the chunk_id, so the existing graph search reaches
+        the right chunk when a query matches on-screen text. Purely additive: speech
+        nodes/edges are never removed or rewritten.
+        """
+        stats = {
+            "frame_nodes": 0, "visual_entities": 0, "merged_with_speech": 0,
+            "grounded_links": 0, "cross_modal_edges": 0, "frames_with_ocr": 0,
+        }
+        if not self.graph or not keyframes or not chunks:
+            return stats
+        if not self.nlp:
+            self.initialize()
+
+        chunk_by_id = {c["chunk_id"]: c for c in chunks}
+        stop_words = self._STOP_NOUN_CHUNKS
+
+        def spoken_entities_of(chunk_id: str) -> List[str]:
+            ents = []
+            for node, data in self.graph.nodes(data=True):
+                if data.get("modality", "speech") == "visual":
+                    continue
+                if chunk_id in data.get("chunk_ids", set()) and 3 <= len(node) and node not in stop_words \
+                        and len(node.split()) <= 3 and not node.startswith("keyframe_"):
+                    ents.append((node, len(data.get("mentions", []))))
+            ents.sort(key=lambda x: x[1], reverse=True)
+            return [e for e, _ in ents[:max_spoken_candidates]]
+
+        ocr_docs = {}
+        ocr_frames = [kf for kf in keyframes if kf.get("ocr_text")]
+        for kf, doc in zip(ocr_frames, self.nlp.pipe([kf["ocr_text"] for kf in ocr_frames], batch_size=16)):
+            ocr_docs[id(kf)] = doc
+
+        for kf in keyframes:
+            cid = kf.get("chunk_id")
+            chunk = chunk_by_id.get(cid)
+            if not chunk:
+                continue
+            n = kf.get("display_index")
+            frame_node = f"keyframe_{n}"
+            self.graph.add_node(
+                frame_node, label="VISUAL_FRAME", entity_type="VISUAL_FRAME", modality="visual",
+                mentions=[], chunk_ids={cid}, keyframe_ids={n},
+                time_start=kf.get("timestamp", chunk["time_start"]), time_end=chunk["time_end"],
+                confidence=0.8,
+            )
+            stats["frame_nodes"] += 1
+            spoken = spoken_entities_of(cid)
+
+            # 1) OCR entities (on-screen text)
+            ocr_entity_nodes: List[str] = []
+            doc = ocr_docs.get(id(kf))
+            if doc is not None:
+                stats["frames_with_ocr"] += 1
+                pseudo = {"chunk_id": cid, "time_start": chunk["time_start"], "time_end": chunk["time_end"]}
+                ents, _ = self._extract_from_doc(doc, pseudo)
+                seen = set()
+                for e in ents:
+                    text = e["text"]
+                    if text in seen or text.startswith("keyframe_") or not any(ch.isalpha() for ch in text):
+                        continue
+                    seen.add(text)
+                    if self.graph.has_node(text):
+                        nd = self.graph.nodes[text]
+                        if nd.get("modality", "speech") == "speech":
+                            nd["modality"] = "both"
+                            stats["merged_with_speech"] += 1
+                        nd.setdefault("keyframe_ids", set()).add(n)
+                        nd["chunk_ids"].add(cid)
+                    else:
+                        self.graph.add_node(
+                            text, label="VISUAL_TEXT", entity_type="VISUAL_TEXT", modality="visual",
+                            mentions=[kf.get("timestamp", chunk["time_start"])],
+                            chunk_ids={cid}, keyframe_ids={n},
+                            time_start=chunk["time_start"], time_end=chunk["time_end"],
+                            confidence=0.6,
+                        )
+                        stats["visual_entities"] += 1
+                    ocr_entity_nodes.append(text)
+                    self.graph.add_edge(
+                        frame_node, text, predicates=["shows"], chunk_ids={cid},
+                        time_start=chunk["time_start"], time_end=chunk["time_end"],
+                        confidence=0.6, relation_type="visual", weight=1,
+                    )
+
+            # 2) CLIP grounding: which spoken entities are visible in the frame?
+            grounded = visual_index.ground_entities(kf, spoken, ground_min_sim, ground_top_k) if spoken else []
+            kf["grounded_entities"] = grounded
+            for g in grounded:
+                ent = g["entity"]
+                self.graph.nodes[ent].setdefault("keyframe_ids", set()).add(n)
+                self.graph.add_edge(
+                    frame_node, ent, predicates=["visually grounds"], chunk_ids={cid},
+                    time_start=chunk["time_start"], time_end=chunk["time_end"],
+                    confidence=float(g["similarity"]), relation_type="cross-modal",
+                    weight=float(g["similarity"]),
+                )
+                stats["grounded_links"] += 1
+
+            # 3) on-screen entity <-> spoken entities in the same time window
+            partners = [e for e in spoken if e not in ocr_entity_nodes][:5]
+            for oe in ocr_entity_nodes[:8]:
+                for sp in partners:
+                    if oe == sp or self.graph.has_edge(oe, sp):
+                        continue
+                    self.graph.add_edge(
+                        oe, sp, predicates=["displayed-with"], chunk_ids={cid},
+                        time_start=chunk["time_start"], time_end=chunk["time_end"],
+                        confidence=0.4, relation_type="cross-modal", weight=1,
+                    )
+                    stats["cross_modal_edges"] += 1
+
+        # refresh cheap metrics so centrality includes the new nodes
+        self._compute_graph_metrics()
+        logger.info(f"Visual KG extension: {stats}")
+        return stats
+
     def reset(self):
         """Clear the graph so the next task starts with a clean slate."""
         self.graph = None

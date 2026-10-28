@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   Upload, FileVideo, Clock, FileText, Download, Settings,
   CheckCircle, AlertCircle, RotateCcw, X, ChevronRight,
@@ -411,6 +411,47 @@ const SkeletonCard = ({ lines = 6 }) => (
   </div>
 );
 
+/* Shape a completed /status payload into the structure ResultsPanel renders.
+   Shared by the live-processing path and URL rehydration (?task=<id>). */
+const mapResults = (status, fallbackTaskId) => {
+  const rawSummary = status.results?.summary;
+  const rawTopicSummary = status.results?.topic_summary;
+  return {
+    transcript: status.results?.transcript?.segments
+      ? status.results.transcript.segments.map(s => s.text).join(' ')
+      : status.results?.transcript || 'No transcript available',
+    // Keep timed segments for the in-app caption overlay (karaoke / flashy styles).
+    segments: status.results?.transcript?.segments || [],
+    summary: {
+      text: rawSummary?.summary || (typeof rawSummary === 'string' ? rawSummary : 'No summary available'),
+      key_points: rawSummary?.key_points || [],
+      summary_type: rawSummary?.summary_type || 'extractive',
+      method: rawSummary?.method,
+      summary_length: rawSummary?.summary_length,
+      retrieved_chunk_count: rawSummary?.retrieved_chunk_count,
+      keyframe_refs: rawSummary?.keyframe_refs || [],
+    },
+    topic_summary: rawTopicSummary ? {
+      text: rawTopicSummary?.summary || '',
+      key_points: rawTopicSummary?.key_points || [],
+      summary_type: rawTopicSummary?.summary_type || 'gemini',
+      topic: rawTopicSummary?.topic,
+      retrieved_chunk_count: rawTopicSummary?.retrieved_chunk_count,
+      keyframe_refs: rawTopicSummary?.keyframe_refs || [],
+    } : null,
+    subtitles: status.results?.subtitles?.subtitles || status.results?.subtitles || 'No subtitles available',
+    keyframes: status.results?.keyframes?.keyframes
+      ? status.results.keyframes.keyframes.map(kf => ({ ...kf, path: kf.frame_path || kf.path || 'unknown' }))
+      : [],
+    rag: status.results?.rag || null,
+    citations: status.results?.citations || [],
+    video_url: status.results?.video_url || null,
+    subtitles_vtt_url: status.results?.subtitles_vtt_url || null,
+    task_id: status.results?.task_id || fallbackTaskId,
+    filename: status.results?.filename || null,
+  };
+};
+
 /* ─── Main ──────────────────────────────────────────────────────────────────── */
 const VideoUpload = () => {
   const [videoFile, setVideoFile]           = useState(null);
@@ -431,6 +472,38 @@ const VideoUpload = () => {
   const [currentPhaseId, setCurrentPhaseId]       = useState('init');
   const [completedPhaseIds, setCompletedPhaseIds] = useState([]);
   const [showRawSrt, setShowRawSrt]               = useState(false);
+  const [searchParams, setSearchParams]           = useSearchParams();
+  const taskParam = searchParams.get('task');
+  const tabParam  = searchParams.get('tab');
+  const [restoring, setRestoring]                 = useState(false);
+
+  // Rehydrate a finished task from the URL (e.g. coming back from Pipeline Logs).
+  // Results are persisted server-side, so no local state is needed.
+  useEffect(() => {
+    if (!taskParam || results || isProcessing) return;
+    let cancelled = false;
+    setRestoring(true);
+    apiService.getStatus(taskParam)
+      .then((status) => {
+        if (cancelled) return;
+        if (status.status === 'completed' && status.results) {
+          const mapped = mapResults(status, taskParam);
+          setSelectedOptions(prev => ({
+            ...prev,
+            transcript: !!status.results.transcript,
+            subtitles: !!status.results.subtitles,
+            summary: !!status.results.summary,
+            topicBased: !!status.results.topic_summary,
+          }));
+          setResults(mapped);
+        } else {
+          setSearchParams({}, { replace: true });
+        }
+      })
+      .catch(() => { if (!cancelled) setSearchParams({}, { replace: true }); })
+      .finally(() => { if (!cancelled) setRestoring(false); });
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line
 
   useEffect(() => {
     if (!isProcessing) { setPhaseMessageIdx(0); setCurrentPhaseId('init'); setCompletedPhaseIds([]); return; }
@@ -470,6 +543,7 @@ const VideoUpload = () => {
   const handleProcess = async () => {
     if (!videoFile) return;
     setIsProcessing(true); setResults(null); setError(null);
+    setSearchParams({}, { replace: true });
     setCurrentPhaseId('init'); setCompletedPhaseIds([]); setPhaseMessageIdx(0);
     try {
       const options = {
@@ -485,39 +559,8 @@ const VideoUpload = () => {
       apiService.pollStatus(response.task_id, (status) => {
         setProcessingStep(status.current_step || '');
         if (status.status === 'completed') {
-          const rawSummary = status.results?.summary;
-          const rawTopicSummary = status.results?.topic_summary;
-          setResults({
-            transcript: status.results?.transcript?.segments
-              ? status.results.transcript.segments.map(s => s.text).join(' ')
-              : status.results?.transcript || 'No transcript available',
-            // Keep timed segments for the in-app caption overlay (karaoke / flashy styles).
-            segments: status.results?.transcript?.segments || [],
-            summary: {
-              text: rawSummary?.summary || (typeof rawSummary === 'string' ? rawSummary : 'No summary available'),
-              key_points: rawSummary?.key_points || [],
-              summary_type: rawSummary?.summary_type || 'extractive',
-              method: rawSummary?.method,
-              summary_length: rawSummary?.summary_length,
-              retrieved_chunk_count: rawSummary?.retrieved_chunk_count,
-            },
-            topic_summary: rawTopicSummary ? {
-              text: rawTopicSummary?.summary || '',
-              key_points: rawTopicSummary?.key_points || [],
-              summary_type: rawTopicSummary?.summary_type || 'gemini',
-              topic: rawTopicSummary?.topic,
-              retrieved_chunk_count: rawTopicSummary?.retrieved_chunk_count,
-            } : null,
-            subtitles: status.results?.subtitles?.subtitles || status.results?.subtitles || 'No subtitles available',
-            keyframes: status.results?.keyframes?.keyframes
-              ? status.results.keyframes.keyframes.map(kf => ({ ...kf, path: kf.frame_path || kf.path || 'unknown' }))
-              : [],
-            rag: status.results?.rag || null,
-            citations: status.results?.citations || [],
-            video_url: status.results?.video_url || null,
-            subtitles_vtt_url: status.results?.subtitles_vtt_url || null,
-            task_id: status.results?.task_id || response.task_id,
-          });
+          setResults(mapResults(status, response.task_id));
+          setSearchParams({ task: response.task_id }, { replace: true });
           setIsProcessing(false);
         } else if (status.status === 'failed' || status.status === 'error') {
           setError(status.error || 'Processing failed');
@@ -532,17 +575,18 @@ const VideoUpload = () => {
 
   const handleDownload = (type) => {
     let content = '', filename = '';
+    const baseName = (videoFile?.name || results?.filename || 'video').replace(/\.[^/.]+$/, '');
     switch (type) {
-      case 'transcript': content = typeof results.transcript === 'string' ? results.transcript : ''; filename = `transcript_${videoFile.name.replace(/\.[^/.]+$/, '')}.txt`; break;
-      case 'subtitles': content = typeof results.subtitles === 'string' ? results.subtitles : ''; filename = `subtitles_${videoFile.name.replace(/\.[^/.]+$/, '')}.${subtitleFormat}`; break;
+      case 'transcript': content = typeof results.transcript === 'string' ? results.transcript : ''; filename = `transcript_${baseName}.txt`; break;
+      case 'subtitles': content = typeof results.subtitles === 'string' ? results.subtitles : ''; filename = `subtitles_${baseName}.${subtitleFormat}`; break;
       case 'summary':
         content = results.summary?.text || '';
         if (results.summary?.key_points?.length) content += '\n\nKey Points:\n' + results.summary.key_points.map(p => `• ${p}`).join('\n');
-        filename = `summary_${videoFile.name.replace(/\.[^/.]+$/, '')}.txt`; break;
+        filename = `summary_${baseName}.txt`; break;
       case 'keyframes':
         content = (Array.isArray(results.keyframes) ? results.keyframes : []).map(kf => `${kf.timestamp || kf.time}: ${kf.description || 'Keyframe'}`).join('\n');
-        filename = `keyframes_${videoFile.name.replace(/\.[^/.]+$/, '')}.txt`; break;
-      case 'rag': content = results.rag?.summary?.summary || ''; filename = `rag_summary_${videoFile.name.replace(/\.[^/.]+$/, '')}.txt`; break;
+        filename = `keyframes_${baseName}.txt`; break;
+      case 'rag': content = results.rag?.summary?.summary || ''; filename = `rag_summary_${baseName}.txt`; break;
     }
     const blob = new Blob([content], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
@@ -552,6 +596,7 @@ const VideoUpload = () => {
 
   const resetUpload = () => {
     setVideoFile(null); setResults(null); setIsProcessing(false); setError(null);
+    setSearchParams({}, { replace: true });
     setSelectedTopic(''); setSummaryLength('medium'); setSubtitleFormat('srt');
     setSelectedOptions({ subtitles: true, transcript: true, summary: true, keyframes: true, rag: true, topicBased: false });
   };
@@ -591,7 +636,7 @@ const VideoUpload = () => {
         </div>
 
         {/* Upload zone */}
-        {!videoFile && (
+        {!videoFile && !results && !restoring && (
           <div
             className={`up-zone${isDragging ? ' dragging' : ''}`}
             onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
@@ -781,13 +826,15 @@ const VideoUpload = () => {
               showRawSrt={showRawSrt}
               setShowRawSrt={setShowRawSrt}
               taskId={results.task_id}
+              initialTab={tabParam}
+              onTabChange={(tab) => setSearchParams({ task: results.task_id, tab }, { replace: true })}
             />
             <div className="results-actions">
               <button onClick={resetUpload} className="btn-teal">
                 <RotateCcw size={14} />Process another
               </button>
               {results.task_id && (
-                <Link to={`/logs/${results.task_id}`} className="btn-glass">
+                <Link to={`/logs/${results.task_id}${tabParam ? `?tab=${tabParam}` : ''}`} className="btn-glass">
                   Pipeline Logs<ChevronRight size={14} />
                 </Link>
               )}

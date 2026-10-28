@@ -54,6 +54,10 @@ class RetrievalEngine:
         self.knowledge_graph = None
         self.vector_store = None
         self.semantic_chunks = []
+        # Optional cross-modal channel (CLIP text->frame). None => text-only pipeline.
+        self.visual_index = None
+        self.visual_weight = 0.25
+        self.visual_min_score = 0.22   # CLIP text-image cosines: noise floor is ~0.20, true matches ~0.25-0.35
         
         # Text processing
         self.tfidf_vectorizer = None
@@ -61,7 +65,8 @@ class RetrievalEngine:
     def initialize(self, 
                    knowledge_graph: KnowledgeGraph,
                    vector_store: VectorStore,
-                   semantic_chunks: List[Dict[str, Any]]):
+                   semantic_chunks: List[Dict[str, Any]],
+                   visual_index=None):
         """
         Initialize retrieval engine with components
         
@@ -79,6 +84,7 @@ class RetrievalEngine:
             self.knowledge_graph = knowledge_graph
             self.vector_store = vector_store
             self.semantic_chunks = semantic_chunks
+            self.visual_index = visual_index if (visual_index is not None and visual_index.ready) else None
             
             # Initialize TF-IDF for text overlap scoring
             self._initialize_tfidf()
@@ -221,14 +227,27 @@ class RetrievalEngine:
             None, self._vector_search, decomposed_query, top_k_vector, expand_temporal
         )
         
-        # Wait for both searches to complete
+        # Visual channel: only for content queries. A generic "summarize the video"
+        # query has no visual meaning, so CLIP would just return noise for it.
+        use_visual = self.visual_index is not None and decomposed_query["query_type"] != "summary"
+        visual_task = (
+            loop.run_in_executor(None, self._visual_search, decomposed_query, top_k_vector)
+            if use_visual else None
+        )
+
+        # Wait for the searches to complete
         graph_results, vector_results = await asyncio.gather(graph_task, vector_task)
+        visual_results = await visual_task if visual_task is not None else []
         
-        logger.info(f"Graph search: {len(graph_results)} results, Vector search: {len(vector_results)} results")
+        logger.info(
+            f"Graph search: {len(graph_results)} results, Vector search: {len(vector_results)} results"
+            + (f", Visual search: {len(visual_results)} results" if use_visual else "")
+        )
         
         # Fuse and re-rank results
         fused_results = self._fuse_and_rerank(
-            graph_results, vector_results, decomposed_query, top_k_final, topic_mode
+            graph_results, vector_results, decomposed_query, top_k_final, topic_mode,
+            visual_results=visual_results,
         )
         
         logger.info(f"Final retrieval: {len(fused_results)} results")
@@ -284,6 +303,24 @@ class RetrievalEngine:
 
         return results
 
+    def _visual_search(self, decomposed_query: Dict[str, Any], k: int) -> List[Dict[str, Any]]:
+        """Text -> keyframe retrieval (CLIP), mapped to the chunk each keyframe belongs to."""
+        chunk_lookup = {c["chunk_id"]: c for c in self.semantic_chunks}
+        best: Dict[str, float] = {}
+        hits = self.visual_index.search(decomposed_query["raw"], k=min(k, 20))
+        for hit in hits:
+            if hit["score"] < self.visual_min_score:
+                continue
+            cid = hit["keyframe"].get("chunk_id")
+            if cid in chunk_lookup:
+                best[cid] = max(best.get(cid, 0.0), hit["score"])
+        results = []
+        for cid, score in best.items():
+            chunk = chunk_lookup[cid].copy()
+            chunk["visual_score"] = float(score)
+            results.append(chunk)
+        return results
+
     def _top_kg_entities_by_mentions(self, top_n: int = 25) -> List[Tuple[str, int]]:
         """Return [(node_id, mention_count), ...] sorted by mention count desc."""
         if not self.knowledge_graph or not self.knowledge_graph.graph:
@@ -325,9 +362,10 @@ class RetrievalEngine:
                         vector_results: List[Dict[str, Any]],
                         decomposed_query: Dict[str, Any],
                         k: int,
-                        topic_mode: bool = False) -> List[Dict[str, Any]]:
+                        topic_mode: bool = False,
+                        visual_results: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         """
-        Fuse results from both channels and re-rank
+        Fuse results from the channels and re-rank
         
         Args:
             graph_results: Results from graph search
@@ -342,7 +380,7 @@ class RetrievalEngine:
         # Earlier code dropped the second occurrence, silently losing one channel's signal
         # for any chunk surfaced by both retrievers — exactly the chunks we trust most.
         merged_map: Dict[str, Dict[str, Any]] = {}
-        for result in graph_results + vector_results:
+        for result in graph_results + vector_results + (visual_results or []):
             cid = result.get("chunk_id", "")
             if not cid:
                 continue
@@ -350,7 +388,7 @@ class RetrievalEngine:
                 merged_map[cid] = result.copy()
             else:
                 existing = merged_map[cid]
-                for key in ("vector_score", "graph_score"):
+                for key in ("vector_score", "graph_score", "visual_score"):
                     if key in result and result[key] > existing.get(key, 0.0):
                         existing[key] = result[key]
         merged_results: List[Dict[str, Any]] = list(merged_map.values())
@@ -377,6 +415,7 @@ class RetrievalEngine:
             result["text_overlap_score"] = round(
                 min(max(text_overlap_scores.get(result["chunk_id"], 0.0), 0.0), 1.0), 4
             )
+            result["visual_score"] = round(min(max(result.get("visual_score", 0.0), 0.0), 1.0), 4)
             result["vector_rank"] = 1.0 if result["vector_score"] > 0 else 0.0
             result["graph_rank"] = 1.0 if result["graph_score"] > 0 else 0.0
 
@@ -401,6 +440,7 @@ class RetrievalEngine:
         vector_ranks = _channel_ranks("vector_score")
         graph_ranks = _channel_ranks("graph_score")
         text_ranks = _channel_ranks("text_overlap_score")
+        visual_ranks = _channel_ranks("visual_score") if visual_results else {}
 
         for result in merged_results:
             cid = result["chunk_id"]
@@ -411,6 +451,8 @@ class RetrievalEngine:
                 rrf_score += weights["graph"] / (RRF_K + graph_ranks[cid])
             if cid in text_ranks:
                 rrf_score += weights["text_overlap"] / (RRF_K + text_ranks[cid])
+            if cid in visual_ranks:
+                rrf_score += self.visual_weight / (RRF_K + visual_ranks[cid])
             result["final_score"] = round(rrf_score, 6)
 
         merged_results.sort(key=lambda x: x["final_score"], reverse=True)

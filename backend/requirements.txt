@@ -62,3 +62,6 @@ google-generativeai>=0.8.0
 # For production deployment
 redis>=4.0.0
 celery>=5.0.0
+
+# Visual (cross-modal) channel: CLIP runs via sentence-transformers; OCR via ONNX
+rapidocr-onnxruntime>=1.3.0

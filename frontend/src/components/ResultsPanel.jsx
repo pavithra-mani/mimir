@@ -246,7 +246,7 @@ const PanelStyles = () => (
 
     /* Keyframes */
     .rp-kf-grid {
-      display: grid; grid-template-columns: repeat(auto-fill, minmax(155px, 1fr)); gap: 10px;
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px;
     }
     .rp-kf-cell {
       position: relative; border-radius: 10px; overflow: hidden;
@@ -273,6 +273,23 @@ const PanelStyles = () => (
       font-family: 'Menlo','Consolas',monospace; font-size: 0.68rem; font-weight: 500;
       padding: 2px 7px; border-radius: 100px;
     }
+    .rp-kf-item { display: flex; flex-direction: column; gap: 8px; border-radius: 12px; padding: 4px; transition: box-shadow 0.3s, background 0.3s; }
+    .rp-kf-item.highlight { background: rgba(201,168,76,0.08); box-shadow: 0 0 0 1px rgba(201,168,76,0.55); }
+    .rp-kf-num {
+      position: absolute; top: 6px; left: 6px; z-index: 1;
+      background: #c9a84c; color: #0a0f1a; font-size: 0.68rem; font-weight: 700;
+      padding: 2px 8px; border-radius: 100px;
+    }
+    .rp-kf-meta { display: flex; flex-direction: column; gap: 3px; padding: 0 4px 4px; }
+    .rp-kf-range { font-family: 'Menlo','Consolas',monospace; font-size: 0.68rem; color: #c9a84c; }
+    .rp-kf-title { font-size: 0.8rem; font-weight: 500; color: rgba(248,235,190,0.95); line-height: 1.35; }
+    .rp-kf-desc { font-size: 0.76rem; color: rgba(248,235,190,0.7); line-height: 1.5; font-weight: 300; }
+    .rp-kf-ref {
+      display: inline; padding: 0 6px; margin: 0 1px; cursor: pointer;
+      background: rgba(201,168,76,0.12); border: 1px solid rgba(201,168,76,0.35);
+      border-radius: 100px; color: #c9a84c; font: inherit; font-size: 0.82em; font-weight: 500;
+    }
+    .rp-kf-ref:hover { background: rgba(201,168,76,0.25); }
     .rp-kf-empty {
       padding: 48px 16px; text-align: center;
       color: rgba(220, 195, 130, 0.5); font-style: italic; font-size: 0.86rem; font-weight: 300;
@@ -362,6 +379,39 @@ const CaptionOverlay = ({ videoRef, segments, styleId }) => {
   );
 };
 
+const fmtClock = (sec) => {
+  const n = Math.floor(sec || 0);
+  return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}`;
+};
+
+/* Fallback for results saved before ocr_display existed: first few OCR boxes, whole words only. */
+const shortOcr = (text, max = 150) => {
+  const flat = String(text || '').replace(/ \. /g, ' · ');
+  if (flat.length <= max) return flat;
+  return flat.slice(0, max).replace(/\s+\S*$/, '') + '…';
+};
+
+/* Renders summary text, turning "Keyframe N" mentions (N = a real keyframe) into links. */
+const TextWithKeyframeRefs = ({ text, validNumbers, onRef }) => {
+  if (!text || !validNumbers || validNumbers.size === 0) return <>{text}</>;
+  const parts = text.split(/(Keyframes?\s+\d+)/g);
+  return (
+    <>
+      {parts.map((part, i) => {
+        const m = part.match(/^Keyframes?\s+(\d+)$/);
+        const n = m ? parseInt(m[1], 10) : null;
+        return n && validNumbers.has(n) ? (
+          <button key={i} type="button" className="rp-kf-ref" onClick={() => onRef(n)} title="Show keyframe">
+            {part}
+          </button>
+        ) : (
+          <React.Fragment key={i}>{part}</React.Fragment>
+        );
+      })}
+    </>
+  );
+};
+
 /* ─── ResultsPanel component ─────────────────────────────────────────────────── */
 const ResultsPanel = ({
   results,
@@ -373,6 +423,8 @@ const ResultsPanel = ({
   setShowRawSrt,
   showSuccessBar = true,
   taskId,
+  initialTab,
+  onTabChange,
 }) => {
   const tabs = [];
   if (selectedOptions.transcript) tabs.push({ id: 'transcript', label: 'Transcript',      icon: FileText });
@@ -383,7 +435,23 @@ const ResultsPanel = ({
   // Keyframes always extracted but tab shown when data is present
   if (results.keyframes?.length > 0) tabs.push({ id: 'keyframes', label: 'Keyframes', icon: Image });
 
-  const [activeTab, setActiveTab] = useState(tabs[0]?.id || 'transcript');
+  const [activeTab, setActiveTab] = useState(
+    tabs.some(t => t.id === initialTab) ? initialTab : (tabs[0]?.id || 'transcript')
+  );
+  const [highlightKf, setHighlightKf] = useState(null);
+  const selectTab = (id) => { setActiveTab(id); onTabChange?.(id); };
+  const kfNumbers = useMemo(
+    () => new Set((results.keyframes || []).map((kf, i) => kf.display_index ?? i + 1)),
+    [results.keyframes]
+  );
+  const openKeyframe = (n) => { selectTab('keyframes'); setHighlightKf(n); };
+  useEffect(() => {
+    if (activeTab !== 'keyframes' || highlightKf == null) return;
+    const el = document.getElementById(`kf-${highlightKf}`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const t = setTimeout(() => setHighlightKf(null), 2500);
+    return () => clearTimeout(t);
+  }, [activeTab, highlightKf]);
   const [captionStyle, setCaptionStyle] = useState('classic');
   const videoRef = useRef(null);
   const captionSegments = results.segments || [];
@@ -403,7 +471,7 @@ const ResultsPanel = ({
           </div>
           {taskId && (
             <Link
-              to={`/logs/${taskId}`}
+              to={`/logs/${taskId}?tab=${activeTab}`}
               style={{
                 display: 'flex', alignItems: 'center', gap: 6,
                 fontSize: '0.76rem', color: '#c9a84c', textDecoration: 'none',
@@ -426,7 +494,7 @@ const ResultsPanel = ({
             key={id}
             type="button"
             className={`rp-tab-btn${activeTab === id ? ' active' : ''}`}
-            onClick={() => setActiveTab(id)}
+            onClick={() => selectTab(id)}
           >
             <div className="rp-tab-dot" />
             <Icon size={13} />
@@ -552,7 +620,11 @@ const ResultsPanel = ({
             <div className="rp-panel-body">
               <div className="rp-summary-layout">
                 <div className="rp-summary-text-block">
-                  {results.summary.text || results.summary.summary || ''}
+                  <TextWithKeyframeRefs
+                    text={results.summary.text || results.summary.summary || ''}
+                    validNumbers={kfNumbers}
+                    onRef={openKeyframe}
+                  />
                 </div>
                 {results.summary.key_points?.length > 0 && (
                   <div className="rp-keypoints-block">
@@ -560,7 +632,7 @@ const ResultsPanel = ({
                     {results.summary.key_points.map((point, i) => (
                       <div key={i} className="rp-keypoint-item">
                         <div className="rp-keypoint-bullet">{i + 1}</div>
-                        <span>{point}</span>
+                        <span><TextWithKeyframeRefs text={point} validNumbers={kfNumbers} onRef={openKeyframe} /></span>
                       </div>
                     ))}
                   </div>
@@ -594,17 +666,38 @@ const ResultsPanel = ({
                 <div className="rp-kf-grid">
                   {results.keyframes.map((kf, i) => {
                     const url = kf.frame_url || null;
+                    const num = kf.display_index ?? i + 1;
                     const ts = typeof kf.timestamp === 'number'
-                      ? `${Math.floor(kf.timestamp / 60)}:${String(Math.floor(kf.timestamp % 60)).padStart(2, '0')}`
+                      ? fmtClock(kf.timestamp)
                       : (kf.timestamp || `${i + 1}`);
-                    return url ? (
-                      <a key={i} href={url} target="_blank" rel="noreferrer" className="rp-kf-cell">
-                        <img src={url} alt={`Keyframe at ${ts}`} loading="lazy" />
-                        <span className="rp-kf-time">{ts}</span>
-                      </a>
-                    ) : (
-                      <div key={i} className="rp-kf-cell" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                        <span className="rp-kf-time" style={{ position: 'static' }}>{ts}</span>
+                    const hasRange = typeof kf.time_start === 'number' && typeof kf.time_end === 'number';
+                    return (
+                      <div key={i} id={`kf-${num}`} className={`rp-kf-item${highlightKf === num ? ' highlight' : ''}`}>
+                        {url ? (
+                          <a href={url} target="_blank" rel="noreferrer" className="rp-kf-cell">
+                            <span className="rp-kf-num">Keyframe {num}</span>
+                            <img src={url} alt={`Keyframe ${num} at ${ts}`} loading="lazy" />
+                            <span className="rp-kf-time">{ts}</span>
+                          </a>
+                        ) : (
+                          <div className="rp-kf-cell" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            <span className="rp-kf-num">Keyframe {num}</span>
+                            <span className="rp-kf-time" style={{ position: 'static' }}>{ts}</span>
+                          </div>
+                        )}
+                        {hasRange && (
+                          <div className="rp-kf-meta">
+                            <span className="rp-kf-range">Transcript {fmtClock(kf.time_start)}–{fmtClock(kf.time_end)}</span>
+                            {kf.label && <span className="rp-kf-title">{kf.label}</span>}
+                            {kf.chunk_text_snippet && <span className="rp-kf-desc">{kf.chunk_text_snippet}</span>}
+                            {(kf.ocr_display || kf.ocr_text) && (
+                              <span className="rp-kf-desc"><b>On screen:</b> {kf.ocr_display || shortOcr(kf.ocr_text)}</span>
+                            )}
+                            {kf.grounded_entities?.length > 0 && (
+                              <span className="rp-kf-desc"><b>Visible &amp; spoken:</b> {kf.grounded_entities.map(g => g.entity).join(', ')}</span>
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -645,7 +738,11 @@ const ResultsPanel = ({
               {results.topic_summary ? (
                 <div className="rp-summary-layout">
                   <div className="rp-summary-text-block">
-                    {results.topic_summary.text || 'No topic summary available.'}
+                    <TextWithKeyframeRefs
+                      text={results.topic_summary.text || 'No topic summary available.'}
+                      validNumbers={kfNumbers}
+                      onRef={openKeyframe}
+                    />
                   </div>
                   {results.topic_summary.key_points?.length > 0 && (
                     <div className="rp-keypoints-block">
@@ -653,7 +750,7 @@ const ResultsPanel = ({
                       {results.topic_summary.key_points.map((point, i) => (
                         <div key={i} className="rp-keypoint-item">
                           <div className="rp-keypoint-bullet">{i + 1}</div>
-                          <span>{point}</span>
+                          <span><TextWithKeyframeRefs text={point} validNumbers={kfNumbers} onRef={openKeyframe} /></span>
                         </div>
                       ))}
                     </div>

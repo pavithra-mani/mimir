@@ -135,3 +135,34 @@ limit.
   directory than expected - the default paths are relative to the `eval/`
   folder itself, not your shell's cwd, so they should work regardless of
   where you invoke the script from.
+
+
+## Visual ablation (does the cross-modal channel help?)
+
+`ablation_visual.py` + `analyze_ablation.py`. Unlike the summarisation eval above, this one
+needs the **video files** (`download_chunks.py --with-videos`, ~46 GB for chunks 1-7; use a
+subset) because keyframes, CLIP and OCR are computed from pixels.
+
+- Task: Video-MME multiple-choice QA from `data/metadata.parquet` (3 questions per video).
+- Conditions: `text_only` (baseline), `visual_retrieval`, `visual_graph`, `ocr_context`, `full`.
+  Each toggles one config flag (`enable_visual_*`, `enable_ocr_in_prompt`).
+- Expensive work (keyframes, CLIP, OCR) runs once per video and is shared by all conditions.
+  CLIP and OCR are local; only the answering step uses Gemini (1 call per question x condition).
+- The expected signature of a real effect: gains on vision-dependent `task_type`s
+  ("OCR Problems", "Counting Problem", "Attribute Perception") and ~none on speech-answerable ones.
+
+```bash
+cd backend
+python eval/ablation_visual.py --dry-run --limit-videos 3          # index stats, no API calls
+python eval/ablation_visual.py --limit-videos 20 --resume \
+    --task-types "OCR Problems,Counting Problem,Attribute Perception,Information Synopsis" \
+    --conditions text_only,full --sleep-between 4                  # minimal 2-condition run
+python eval/analyze_ablation.py                                    # paired CIs + McNemar
+```
+
+Gemini free-tier budgeting: calls = videos x questions x conditions (20 x 3 x 2 = 120 for the
+minimal run above). Use `--sleep-between` and `--resume`; 429s are retried with backoff.
+Caveats: subtitles stand in for ASR, so the text baseline is strong on dialogue-heavy videos;
+the answerer sees OCR text but never the images; thresholds for CLIP are uncalibrated.
+
+**Note on comparability:** retrieval now scales with video length (`adaptive_retrieval_budget`, default on). Summarisation-eval numbers produced before that change used a fixed 30 chunks and a 14,000-character context cut. To reproduce those exactly, set `ADAPTIVE_RETRIEVAL_BUDGET=false`, though the old 14k character cut no longer exists. Compare runs only under the same setting.

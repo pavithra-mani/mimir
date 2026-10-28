@@ -42,6 +42,19 @@ class PipelineConfig(BaseSettings):
     enable_keyframes: bool = True
     enable_topic_analysis: bool = True
     enable_rag: bool = True
+
+    # Cross-modal (visual) channel. Each flag is independent so the ablation
+    # harness can switch components on/off; all use LOCAL models (no API quota).
+    adaptive_retrieval_budget: bool = True  # scale retrieved-chunk count with video length (off => fixed 30 general / 15 topic)
+    enable_keyframe_labels: bool = True     # one batched Gemini call per video for short keyframe titles
+
+    enable_visual_index: bool = True        # CLIP embeddings + OCR over keyframes
+    enable_visual_graph: bool = True        # visual/cross-modal nodes+edges in the KG
+    enable_visual_retrieval: bool = True    # CLIP text->frame channel in hybrid retrieval
+    enable_ocr_in_prompt: bool = True       # on-screen text + grounded entities in the LLM prompt
+    visual_model: str = "clip-ViT-B-32"     # sentence-transformers CLIP (text+image, 512-d)
+    visual_ground_min_sim: float = 0.20     # min CLIP cosine to link a frame to a spoken entity
+    visual_ground_top_k: int = 3            # max grounded spoken entities per frame
     
     class Config:
         env_file = ".env"
